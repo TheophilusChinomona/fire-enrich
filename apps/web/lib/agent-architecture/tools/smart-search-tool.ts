@@ -52,7 +52,7 @@ export function createSmartSearchTool(firecrawlApiKey: string, searchType: Searc
             onProgress(`Executing search: ${enhancedQuery.substring(0, 80)}...`, 'info');
           }
           
-          const results = await firecrawl.search(enhancedQuery, {
+          const results = await firecrawl.v1.search(enhancedQuery, {
             limit: searchType === 'discovery' ? 3 : 5,
             scrapeOptions: {
               formats: ['markdown'],

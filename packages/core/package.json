@@ -31,7 +31,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@mendable/firecrawl-js": "^1.25.1",
+    "@mendable/firecrawl-js": "^4.20.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "openai": "^4.73.0",
     "zod": "^3.25.3",

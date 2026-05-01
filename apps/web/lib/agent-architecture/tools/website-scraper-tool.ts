@@ -31,7 +31,7 @@ export function createWebsiteScraperTool(firecrawlApiKey: string, onProgress?: (
           onProgress(`Starting to scrape ${url}`, 'info');
         }
         
-        const result = await firecrawl.scrapeUrl(url, {
+        const result = await firecrawl.v1.scrapeUrl(url, {
           formats: ['markdown', 'html'],
           onlyMainContent: true,
           waitFor: 2000, // Wait for dynamic content

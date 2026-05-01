@@ -21,8 +21,8 @@ const createSpecializedSearchTool = (firecrawl: FirecrawlApp) => tool({
           options.scrapeOptions = { formats: ['markdown'] };
         }
         
-        const results = await firecrawl.search(query, options);
-        allResults.push(...results.data);
+        const results = await firecrawl.v1.search(query, options);
+        allResults.push(...(results.data ?? []));
       } catch (error) {
         console.error(`Search failed for query "${query}":`, error);
       }

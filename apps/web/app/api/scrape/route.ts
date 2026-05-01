@@ -57,9 +57,9 @@ export async function POST(request: NextRequest) {
     let result: ScrapeResult;
 
     if (url && typeof url === 'string') {
-      result = await app.scrapeUrl(url, params) as ScrapeResult;
+      result = await app.v1.scrapeUrl(url, params) as ScrapeResult;
     } else if (urls && Array.isArray(urls)) {
-      result = await app.batchScrapeUrls(urls, params) as ScrapeResult;
+      result = await app.v1.batchScrapeUrls(urls, params) as ScrapeResult;
     } else {
       return NextResponse.json({ success: false, error: 'Invalid request format. Please check your input and try again.' }, { status: 400 });
     }

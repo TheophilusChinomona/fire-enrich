@@ -30,9 +30,9 @@ export class FirecrawlService {
           };
         }
 
-        const result = await this.app.search(query, searchOptions);
+        const result = await this.app.v1.search(query, searchOptions);
 
-        return result.data.map((item) => ({
+        return (result.data || []).map((item) => ({
           url: item.url || '',
           title: item.title || '',
           description: item.description || '',
@@ -108,11 +108,11 @@ export class FirecrawlService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // First try with normal TLS verification
-        const result = await this.app.scrapeUrl(fullUrl, {
+        const result = await this.app.v1.scrapeUrl(fullUrl, {
           formats: ['markdown', 'html'],
           timeout: 30000, // 30 second timeout
         });
-        
+
         return result;
       } catch (error) {
         // Check if it's an SSL error
@@ -125,7 +125,7 @@ export class FirecrawlService {
         if (isSSLError && attempt === 0) {
           try {
             console.warn(`SSL error for ${fullUrl}, retrying with skipTlsVerification...`);
-            const result = await this.app.scrapeUrl(fullUrl, {
+            const result = await this.app.v1.scrapeUrl(fullUrl, {
               formats: ['markdown', 'html'],
               skipTlsVerification: true,
               timeout: 30000,
