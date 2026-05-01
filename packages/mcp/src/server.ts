@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
   FirecrawlService,
@@ -17,6 +18,27 @@ const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY ?? '';
 if (!FIRECRAWL_API_KEY) {
   console.error('[fire-enrich-mcp] FIRECRAWL_API_KEY is required');
   process.exit(1);
+}
+
+// MCP_BEARER startup gate (Phase 10).
+//
+// Stdio transport has no per-request Authorization header, so the only
+// place to enforce auth is at process start. If MCP_BEARER is set the
+// launcher's env must include a matching FIRE_ENRICH_BEARER, otherwise
+// we exit 1 before the server accepts a single message. Per-principal
+// HTTP-transport auth is the next plan; this is the floor that keeps
+// production deployments from being unauthed by accident.
+const MCP_BEARER = process.env.MCP_BEARER;
+if (MCP_BEARER) {
+  const provided = process.env.FIRE_ENRICH_BEARER ?? '';
+  const a = Buffer.from(MCP_BEARER);
+  const b = Buffer.from(provided);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    console.error(
+      '[fire-enrich-mcp] MCP_BEARER set but FIRE_ENRICH_BEARER missing or does not match',
+    );
+    process.exit(1);
+  }
 }
 
 export function createServer(): McpServer {
