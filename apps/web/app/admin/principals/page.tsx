@@ -10,6 +10,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
+import { NewPrincipalDialog } from './new-principal-dialog';
 import { RevokeButton } from './revoke-button';
 
 export const metadata = {
@@ -38,8 +39,7 @@ export default async function AdminPrincipalsPage() {
               {principals.filter((p) => !p.revokedAt).length} active
             </p>
           </div>
-          {/* Replaced in task 7.5 by NewPrincipalDialog */}
-          <CreatePrincipalPlaceholder />
+          <NewPrincipalDialog />
         </div>
 
         <div className="rounded-lg border bg-card">
@@ -60,7 +60,7 @@ export default async function AdminPrincipalsPage() {
               {principals.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center text-muted-foreground py-12">
-                    No principals yet. Click "New principal" to create one.
+                    No principals yet. Click &quot;New principal&quot; to create one.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -123,9 +123,4 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
-}
-
-function CreatePrincipalPlaceholder() {
-  // Wired in task 7.5 — this is replaced by <NewPrincipalDialog />.
-  return null;
 }
