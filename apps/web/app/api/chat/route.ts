@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { FirecrawlService } from '@/lib/services/firecrawl';
 import { OpenAIService } from '@/lib/services/openai';
+import {
+  NoKeyAvailableError,
+  QuotaExceededError,
+  UnauthorizedError,
+  requireBearer,
+  withFirecrawl,
+  withOpenAI,
+} from '@fire-enrich/core/server';
+import { getDb, type Principal } from '@fire-enrich/db';
 
 export const runtime = 'nodejs';
 
@@ -8,39 +17,63 @@ export const runtime = 'nodejs';
 const activeQueries = new Map<string, AbortController>();
 
 export async function POST(request: NextRequest) {
+  // Authenticate first.
+  const db = getDb();
+  let principal: Principal;
   try {
-    const { question, context, conversationHistory, sessionId } = await request.json();
-
-    if (!question || !question.trim()) {
+    principal = await requireBearer(request.headers, db);
+  } catch (err) {
+    if (err instanceof UnauthorizedError) {
       return NextResponse.json(
-        { error: 'Question is required' },
-        { status: 400 }
+        { code: err.code, error: err.message },
+        { status: 401 }
       );
     }
+    throw err;
+  }
 
-    // Get API keys
-    const openaiApiKey = process.env.OPENAI_API_KEY || request.headers.get('X-OpenAI-API-Key');
-    const firecrawlApiKey = process.env.FIRECRAWL_API_KEY || request.headers.get('X-Firecrawl-API-Key');
+  let body: {
+    question?: string;
+    context?: { tableData?: string; [key: string]: unknown };
+    conversationHistory?: Array<{ role: string; content: string }>;
+    sessionId?: string;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+  const { question, context, conversationHistory, sessionId } = body;
 
-    if (!openaiApiKey || !firecrawlApiKey) {
-      return NextResponse.json(
-        { error: 'Missing API keys' },
-        { status: 500 }
-      );
-    }
+  if (!question || !question.trim()) {
+    return NextResponse.json(
+      { error: 'Question is required' },
+      { status: 400 }
+    );
+  }
 
+  try {
     // Create abort controller for this query
     const abortController = new AbortController();
     const queryId = sessionId || `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     activeQueries.set(queryId, abortController);
 
-    const firecrawl = new FirecrawlService(firecrawlApiKey);
-    const openai = new OpenAIService(openaiApiKey);
-
     // Create streaming response
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
+        const emitFatalError = (
+          code: string,
+          message: string,
+          scope?: 'firecrawl' | 'openai'
+        ) => {
+          const payload: Record<string, unknown> = { code, error: message };
+          if (scope) payload.scope = scope;
+          controller.enqueue(
+            encoder.encode(`event: error\ndata: ${JSON.stringify(payload)}\n\n`)
+          );
+        };
+
         try {
           // Step 1: Check table data first
           controller.enqueue(
@@ -57,7 +90,19 @@ export async function POST(request: NextRequest) {
           const tableData = context?.tableData || '';
           if (tableData && tableData.trim().length > 0) {
             console.log('[Chat API] Checking table data, length:', tableData.length);
-            const tableAnswer = await openai.answerFromTableData(question, tableData, conversationHistory);
+            const tableAnswer = await withOpenAI(
+              principal,
+              'chat',
+              db,
+              async (key) => {
+                const openai = new OpenAIService(key.key);
+                return openai.answerFromTableData(
+                  question,
+                  tableData,
+                  conversationHistory
+                );
+              }
+            );
 
             if (tableAnswer && tableAnswer.found) {
               console.log('[Chat API] Answer found in table data');
@@ -105,10 +150,19 @@ export async function POST(request: NextRequest) {
             )
           );
 
-          const searchQuery = await openai.generateSearchQuery(question, {
-            ...context,
-            conversationHistory
-          });
+          // OpenAI: generate the search query.
+          const searchQuery = await withOpenAI(
+            principal,
+            'chat',
+            db,
+            async (key) => {
+              const openai = new OpenAIService(key.key);
+              return openai.generateSearchQuery(question, {
+                ...context,
+                conversationHistory,
+              });
+            }
+          );
 
           controller.enqueue(
             encoder.encode(
@@ -131,9 +185,89 @@ export async function POST(request: NextRequest) {
             )
           );
 
-          const searchResults = await firecrawl.search(searchQuery, { limit: 5 });
+          // Firecrawl: search + scrape, both billed under one chat-scope
+          // wrapper to avoid double-recording. The scrape is also paid for
+          // here (firecrawl), and the synthesis-LLM call below is billed
+          // separately on the openai scope.
+          const { searchResults, scrapedMarkdown, bestSource } =
+            await withFirecrawl(principal, 'chat', db, async (key) => {
+              const firecrawl = new FirecrawlService(key.key);
+              const sr = await firecrawl.search(searchQuery, { limit: 5 });
+              if (sr.length === 0) {
+                return {
+                  searchResults: sr,
+                  scrapedMarkdown: '',
+                  bestSource: null as null | { url: string; title?: string },
+                };
+              }
 
-          if (searchResults.length === 0) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'status',
+                    message: `Found ${sr.length} sources`,
+                    step: 'select',
+                    sources: sr.map((r) => ({ url: r.url, title: r.title }))
+                  })}\n\n`
+                )
+              );
+
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'status',
+                    message: 'Evaluating source relevance...',
+                    step: 'evaluating'
+                  })}\n\n`
+                )
+              );
+
+              // Source selection is an LLM call but it's tightly coupled
+              // to the firecrawl pipeline; we run it inside this block
+              // and bill it under openai separately further down. Easier
+              // to keep selection here and pay it under openai inline.
+              // To keep accounting clean, run selection via withOpenAI.
+              const best = await withOpenAI(
+                principal,
+                'chat',
+                db,
+                async (oaKey) => {
+                  const openai = new OpenAIService(oaKey.key);
+                  return openai.selectBestSource(sr, question);
+                }
+              );
+
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'status',
+                    message: `Selected: ${best.title || new URL(best.url).hostname}`,
+                    step: 'selected',
+                    source: { url: best.url, title: best.title }
+                  })}\n\n`
+                )
+              );
+
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'status',
+                    message: `Reading content from ${new URL(best.url).hostname}...`,
+                    step: 'scrape',
+                    source: { url: best.url, title: best.title }
+                  })}\n\n`
+                )
+              );
+
+              const scraped = await firecrawl.scrapeUrl(best.url);
+              return {
+                searchResults: sr,
+                scrapedMarkdown: scraped.data?.markdown || '',
+                bestSource: best,
+              };
+            });
+
+          if (searchResults.length === 0 || !bestSource) {
             controller.enqueue(
               encoder.encode(
                 `data: ${JSON.stringify({
@@ -142,58 +276,13 @@ export async function POST(request: NextRequest) {
                 })}\n\n`
               )
             );
-            controller.close();
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: 'complete' })}\n\n`
+              )
+            );
             return;
           }
-
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'status',
-                message: `Found ${searchResults.length} sources`,
-                step: 'select',
-                sources: searchResults.map(r => ({ url: r.url, title: r.title }))
-              })}\n\n`
-            )
-          );
-
-          // Step 3: Evaluating sources
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'status',
-                message: 'Evaluating source relevance...',
-                step: 'evaluating'
-              })}\n\n`
-            )
-          );
-
-          const bestSource = await openai.selectBestSource(searchResults, question);
-
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'status',
-                message: `Selected: ${bestSource.title || new URL(bestSource.url).hostname}`,
-                step: 'selected',
-                source: { url: bestSource.url, title: bestSource.title }
-              })}\n\n`
-            )
-          );
-
-          // Step 4: Reading content
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'status',
-                message: `Reading content from ${new URL(bestSource.url).hostname}...`,
-                step: 'scrape',
-                source: { url: bestSource.url, title: bestSource.title }
-              })}\n\n`
-            )
-          );
-
-          const scrapedData = await firecrawl.scrapeUrl(bestSource.url);
 
           controller.enqueue(
             encoder.encode(
@@ -216,15 +305,23 @@ export async function POST(request: NextRequest) {
             )
           );
 
-          // Step 5: Generate conversational response
-          const response = await openai.generateConversationalResponse(
-            question,
-            scrapedData.data?.markdown || '',
-            {
-              ...context,
-              conversationHistory
-            },
-            bestSource.url
+          // Synthesis LLM call billed under openai/synthesis.
+          const response = await withOpenAI(
+            principal,
+            'synthesis',
+            db,
+            async (key) => {
+              const openai = new OpenAIService(key.key);
+              return openai.generateConversationalResponse(
+                question,
+                scrapedMarkdown,
+                {
+                  ...context,
+                  conversationHistory,
+                },
+                bestSource.url
+              );
+            }
           );
 
           controller.enqueue(
@@ -245,14 +342,20 @@ export async function POST(request: NextRequest) {
 
         } catch (error) {
           console.error('[Chat API] Error:', error);
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'error',
-                message: error instanceof Error ? error.message : 'An error occurred'
-              })}\n\n`
-            )
-          );
+          if (error instanceof QuotaExceededError) {
+            emitFatalError(error.code, error.message, error.scope);
+          } else if (error instanceof NoKeyAvailableError) {
+            emitFatalError(error.code, error.message, error.scope);
+          } else {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: 'error',
+                  message: error instanceof Error ? error.message : 'An error occurred'
+                })}\n\n`
+              )
+            );
+          }
         } finally {
           activeQueries.delete(queryId);
           controller.close();
@@ -276,7 +379,8 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Stop endpoint
+// Stop endpoint. Like /api/enrich's DELETE, queryId is treated as a
+// capability — no bearer required.
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const queryId = searchParams.get('queryId');
