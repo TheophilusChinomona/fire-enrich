@@ -160,4 +160,91 @@ export class FirecrawlService {
     
     throw new Error(`Failed to scrape ${fullUrl} after ${maxRetries} attempts`);
   }
+
+  // ---------- v4 surface (Phase 5) ----------
+  // These call the v4 top-level methods on the SDK directly, not via .v1.
+  // Return shapes are normalised into the plain JSON our routes expose.
+
+  /**
+   * Kick off an async crawl. Returns the job id; poll with `getCrawlStatus`.
+   */
+  async startCrawl(
+    url: string,
+    options?: Record<string, unknown>,
+  ): Promise<{ jobId: string }> {
+    const fullUrl = url.startsWith('http') ? url : `https://${url}`;
+    const res = await this.app.startCrawl(fullUrl, options as never);
+    const jobId = (res as { id?: string }).id;
+    if (!jobId) {
+      throw new Error('Firecrawl startCrawl returned no job id');
+    }
+    return { jobId };
+  }
+
+  /**
+   * Fetch current status of a crawl job. Pass-through of SDK shape.
+   */
+  async getCrawlStatus(jobId: string): Promise<unknown> {
+    return this.app.getCrawlStatus(jobId);
+  }
+
+  /**
+   * Cancel a running crawl. Wraps the SDK's boolean response.
+   */
+  async cancelCrawl(jobId: string): Promise<{ ok: boolean }> {
+    const ok = await this.app.cancelCrawl(jobId);
+    return { ok: Boolean(ok) };
+  }
+
+  /**
+   * Map a website's URL graph into a flat list of links.
+   */
+  async mapUrl(
+    url: string,
+    options?: Record<string, unknown>,
+  ): Promise<{ links: string[] }> {
+    const fullUrl = url.startsWith('http') ? url : `https://${url}`;
+    const result = await this.app.map(fullUrl, options as never);
+    const links = (result as { links?: unknown[] }).links;
+    return {
+      links: Array.isArray(links)
+        ? (links as unknown[])
+            .map((l) => (typeof l === 'string' ? l : (l as { url?: string }).url ?? ''))
+            .filter((s): s is string => typeof s === 'string' && s.length > 0)
+        : [],
+    };
+  }
+
+  /**
+   * Structured extraction. Accepts urls + prompt and/or schema.
+   * Schema can be a Zod schema or a plain object descriptor — passed
+   * through to the SDK as-is.
+   */
+  async extract(args: {
+    urls: string[];
+    prompt?: string;
+    schema?: unknown;
+    showSources?: boolean;
+  }): Promise<unknown> {
+    return this.app.extract(args as never);
+  }
+
+  /**
+   * Start an async batch scrape. Poll with `getBatchScrapeStatus`.
+   */
+  async startBatchScrape(
+    urls: string[],
+    options?: Record<string, unknown>,
+  ): Promise<{ jobId: string }> {
+    const res = await this.app.startBatchScrape(urls, options as never);
+    const jobId = (res as { id?: string }).id;
+    if (!jobId) {
+      throw new Error('Firecrawl startBatchScrape returned no job id');
+    }
+    return { jobId };
+  }
+
+  async getBatchScrapeStatus(jobId: string): Promise<unknown> {
+    return this.app.getBatchScrapeStatus(jobId);
+  }
 }
