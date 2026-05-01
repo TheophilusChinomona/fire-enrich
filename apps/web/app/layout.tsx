@@ -4,6 +4,8 @@ import { Roboto_Mono } from "next/font/google";
 import ColorStyles from "@/components/shared/color-styles/color-styles";
 import Scrollbar from "@/components/ui/scrollbar";
 import { Toaster } from "sonner";
+import { AppSidebar } from "@/components/app/sidebar/AppSidebar";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import "@/styles/main.css";
 
 const robotoMono = Roboto_Mono({
@@ -33,7 +35,12 @@ export default function RootLayout({
       <body
         className={`${GeistMono.variable} ${robotoMono.variable} font-sans text-accent-black bg-background-base overflow-x-clip`}
       >
-        <main className="overflow-x-clip">{children}</main>
+        <SidebarProvider>
+          <AppSidebar />
+          <SidebarInset>
+            <main className="overflow-x-clip">{children}</main>
+          </SidebarInset>
+        </SidebarProvider>
         <Scrollbar />
         <Toaster />
       </body>
