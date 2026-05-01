@@ -1,75 +1,52 @@
-import { NextRequest, NextResponse } from 'next/server';
-import FirecrawlApp from '@mendable/firecrawl-js';
-import { isRateLimited } from '@/lib/rate-limit';
+import { z } from 'zod';
 
-interface ScrapeRequestBody {
-  url?: string;
-  urls?: string[];
-  [key: string]: unknown;
-}
+import { firecrawlRoute } from '@/lib/firecrawl-route';
 
-interface ScrapeResult {
-  success: boolean;
-  data?: Record<string, unknown>;
-  error?: string;
-}
+/**
+ * /api/scrape — DEPRECATED compat alias.
+ *
+ * Forwards to the same handlers as /api/firecrawl/scrape (single-URL)
+ * and /api/firecrawl/batch-scrape (multi-URL). Kept on the original
+ * path so existing CLI/curl integrations don't break, but it now
+ * REQUIRES a bearer token (the IP-based rate limit was removed in
+ * favor of per-principal quotas) and no longer reads the legacy
+ * `X-Firecrawl-API-Key` header.
+ *
+ * New code should call /api/firecrawl/scrape or
+ * /api/firecrawl/batch-scrape directly.
+ */
 
-interface ApiError extends Error {
-  status?: number;
-}
+const SingleBody = z.object({
+  url: z.string().min(1),
+  options: z.record(z.unknown()).optional(),
+});
 
-export async function POST(request: NextRequest) {
-  const rateLimit = await isRateLimited(request, 'scrape');
-  
-  if (!rateLimit.success) {
-    return NextResponse.json({ 
-      success: false,
-      error: 'Rate limit exceeded. Please try again later.' 
-    }, { 
-      status: 429,
-      headers: {
-        'X-RateLimit-Limit': rateLimit.limit.toString(),
-        'X-RateLimit-Remaining': rateLimit.remaining.toString(),
-      }
-    });
-  }
+const BatchBody = z.object({
+  urls: z.array(z.string().min(1)).min(1),
+  options: z.record(z.unknown()).optional(),
+});
 
-  let apiKey = process.env.FIRECRAWL_API_KEY;
-  
-  if (!apiKey) {
-    const headerApiKey = request.headers.get('X-Firecrawl-API-Key');
-    
-    if (!headerApiKey) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'API configuration error. Please try again later or contact support.' 
-      }, { status: 500 });
+const Body = z.union([SingleBody, BatchBody]);
+
+export const POST = firecrawlRoute(
+  // Op label is dynamic; we use the firecrawlRoute helper twice indirectly
+  // by inspecting the parsed body inside `exec`. Bill under the matched
+  // op so quota accounting matches the dedicated routes.
+  'scrape',
+  Body,
+  async (svc, body) => {
+    // NB: both branches record under `scrape` even when a batch was
+    // requested. The firecrawlRoute helper picks the op label up front,
+    // not from the body; rather than fork the helper just for this
+    // compat shim we accept the slight accounting drift and let the
+    // dedicated /api/firecrawl/batch-scrape path (which records
+    // `batch_scrape`) remain canonical.
+    if ('urls' in body && Array.isArray(body.urls)) {
+      return svc.startBatchScrape(body.urls, body.options);
     }
-    
-    apiKey = headerApiKey;
-  }
-
-  try {
-    const app = new FirecrawlApp({ apiKey, apiUrl: process.env.FIRECRAWL_API_URL });
-    const body = await request.json() as ScrapeRequestBody;
-    const { url, urls, ...params } = body;
-
-    let result: ScrapeResult;
-
-    if (url && typeof url === 'string') {
-      result = await app.v1.scrapeUrl(url, params) as ScrapeResult;
-    } else if (urls && Array.isArray(urls)) {
-      result = await app.v1.batchScrapeUrls(urls, params) as ScrapeResult;
-    } else {
-      return NextResponse.json({ success: false, error: 'Invalid request format. Please check your input and try again.' }, { status: 400 });
+    if ('url' in body && typeof body.url === 'string') {
+      return svc.scrapeUrl(body.url);
     }
-    
-    return NextResponse.json(result);
-
-  } catch (error: unknown) {
-    console.error('Error in /api/scrape endpoint (SDK):', error);
-    const err = error as ApiError;
-    const errorStatus = typeof err.status === 'number' ? err.status : 500;
-    return NextResponse.json({ success: false, error: 'An error occurred while processing your request. Please try again later.' }, { status: errorStatus });
+    throw new Error('expected either "url" or "urls" in body');
   }
-} 
+);
