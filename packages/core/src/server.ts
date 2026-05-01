@@ -5,3 +5,6 @@ export * from './auth/bearer.js';
 export * from './auth/admin.js';
 export * from './auth/quota.js';
 export * from './auth/with-bearer.js';
+export * from './auth/key-resolver.js';
+export * from './auth/with-firecrawl.js';
+export * from './auth/with-openai.js';
