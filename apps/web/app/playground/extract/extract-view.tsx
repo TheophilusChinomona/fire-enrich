@@ -1,16 +1,20 @@
 'use client';
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Play } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 
 import { ErrorAlert, type ApiError } from '../_components/ErrorAlert';
 import { MissingTokenBanner } from '../_components/MissingTokenBanner';
 import { ResultViewer } from '../_components/ResultViewer';
+import { PageHeader } from '../_components/PageHeader';
+import { Panel, PanelBody, PanelHeader } from '../_components/Panel';
+import { PrimaryButton } from '../_components/PrimaryButton';
+import {
+  AuthStatus,
+  Field,
+  FormTextarea,
+  FormToolbar,
+} from '../_components/form-primitives';
 import { usePlaygroundToken } from '../_components/use-token';
 
 function parseUrls(raw: string): string[] {
@@ -23,15 +27,21 @@ function parseUrls(raw: string): string[] {
 export function ExtractView() {
   const token = usePlaygroundToken();
   const [urlsRaw, setUrlsRaw] = useState('https://example.com');
-  const [prompt, setPrompt] = useState('Extract the page title and a one-sentence summary.');
+  const [prompt, setPrompt] = useState(
+    'Extract the page title and a one-sentence summary.',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<unknown>(null);
   const [error, setError] = useState<ApiError | string | null>(null);
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
+
+  const urlCount = parseUrls(urlsRaw).length;
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
     setResult(null);
+    setElapsedMs(null);
 
     if (!token) {
       setError('Set your bearer token in the sidebar first.');
@@ -44,6 +54,7 @@ export function ExtractView() {
     }
 
     setSubmitting(true);
+    const startedAt = performance.now();
     try {
       const res = await fetch('/api/firecrawl/extract', {
         method: 'POST',
@@ -65,73 +76,103 @@ export function ExtractView() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Network error');
     } finally {
+      setElapsedMs(Math.round(performance.now() - startedAt));
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="container mx-auto max-w-4xl px-6 py-10 flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Extract</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Pull structured data from one or more URLs using a natural-language
-          prompt.
-        </p>
-      </div>
+    <div className="flex min-h-svh flex-col">
+      <PageHeader
+        title="Extract"
+        subtitle="Pull structured data from one or more URLs with a natural-language prompt."
+        endpoint="POST /v2/extract"
+      />
 
-      {!token && <MissingTokenBanner />}
+      <div className="flex-1 px-24 pb-48 pt-24">
+        <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-20">
+          {!token && <MissingTokenBanner />}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Request</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="extract-urls">URLs (one per line)</Label>
-              <Textarea
-                id="extract-urls"
-                rows={4}
-                value={urlsRaw}
-                onChange={(e) => setUrlsRaw(e.target.value)}
-                disabled={submitting}
-                required
+          <Panel>
+            <PanelHeader
+              title="Request"
+              right={
+                <span className="font-mono text-mono-small text-black-alpha-56">
+                  {urlCount} {urlCount === 1 ? 'URL' : 'URLs'}
+                  {elapsedMs !== null && <> · {elapsedMs} ms</>}
+                </span>
+              }
+            />
+            <PanelBody>
+              <form onSubmit={onSubmit} className="flex flex-col gap-16">
+                <Field
+                  id="extract-urls"
+                  label="URLs"
+                  hint="One URL per line. Each is fetched and passed to the prompt."
+                >
+                  <FormTextarea
+                    id="extract-urls"
+                    rows={5}
+                    value={urlsRaw}
+                    onChange={(e) => setUrlsRaw(e.target.value)}
+                    disabled={submitting}
+                    required
+                  />
+                </Field>
+                <Field
+                  id="extract-prompt"
+                  label="Prompt"
+                  hint="Optional. Tells the extractor what fields to return."
+                >
+                  <FormTextarea
+                    id="extract-prompt"
+                    rows={3}
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    disabled={submitting}
+                  />
+                </Field>
+
+                <FormToolbar status={<AuthStatus token={token} />}>
+                  <PrimaryButton type="submit" disabled={submitting || !token}>
+                    {submitting ? (
+                      <>
+                        <Loader2 className="h-14 w-14 animate-spin" />
+                        Extracting…
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-14 w-14" />
+                        Run extract
+                      </>
+                    )}
+                  </PrimaryButton>
+                </FormToolbar>
+              </form>
+            </PanelBody>
+          </Panel>
+
+          {error && <ErrorAlert error={error} />}
+
+          {result !== null && (
+            <Panel>
+              <PanelHeader
+                title="Response"
+                right={
+                  elapsedMs !== null && (
+                    <span className="font-mono text-mono-small text-black-alpha-56">
+                      {elapsedMs} ms
+                    </span>
+                  )
+                }
               />
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="extract-prompt">Prompt (optional)</Label>
-              <Textarea
-                id="extract-prompt"
-                rows={3}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                disabled={submitting}
-              />
-            </div>
-            <div>
-              <Button type="submit" disabled={submitting || !token}>
-                {submitting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Extracting…
-                  </>
-                ) : (
-                  'Run extract'
-                )}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      {error && <ErrorAlert error={error} />}
-
-      {result !== null && (
-        <div className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold">Result</h2>
-          <ResultViewer result={result} />
+              <div className="px-16 pb-16">
+                <ResultViewer result={result} />
+              </div>
+            </Panel>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

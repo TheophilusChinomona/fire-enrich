@@ -5,7 +5,6 @@ import ColorStyles from "@/components/shared/color-styles/color-styles";
 import Scrollbar from "@/components/ui/scrollbar";
 import { Toaster } from "sonner";
 import { AppSidebar } from "@/components/app/sidebar/AppSidebar";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import "@/styles/main.css";
 
 const robotoMono = Roboto_Mono({
@@ -35,12 +34,10 @@ export default function RootLayout({
       <body
         className={`${GeistMono.variable} ${robotoMono.variable} font-sans text-accent-black bg-background-base overflow-x-clip`}
       >
-        <SidebarProvider>
+        <div className="flex min-h-svh w-full">
           <AppSidebar />
-          <SidebarInset>
-            <main className="overflow-x-clip">{children}</main>
-          </SidebarInset>
-        </SidebarProvider>
+          <main className="min-w-0 flex-1 overflow-x-clip">{children}</main>
+        </div>
         <Scrollbar />
         <Toaster />
       </body>

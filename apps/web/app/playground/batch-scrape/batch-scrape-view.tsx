@@ -1,16 +1,20 @@
 'use client';
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Play } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 
 import { ErrorAlert, type ApiError } from '../_components/ErrorAlert';
 import { JobStatusPanel } from '../_components/JobStatusPanel';
 import { MissingTokenBanner } from '../_components/MissingTokenBanner';
+import { PageHeader } from '../_components/PageHeader';
+import { Panel, PanelBody, PanelHeader } from '../_components/Panel';
+import { PrimaryButton } from '../_components/PrimaryButton';
+import {
+  AuthStatus,
+  Field,
+  FormTextarea,
+  FormToolbar,
+} from '../_components/form-primitives';
 import { usePlaygroundToken } from '../_components/use-token';
 
 function parseUrls(raw: string): string[] {
@@ -28,6 +32,8 @@ export function BatchScrapeView() {
   const [submitting, setSubmitting] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | string | null>(null);
+
+  const urlCount = parseUrls(urlsRaw).length;
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -73,58 +79,73 @@ export function BatchScrapeView() {
   };
 
   return (
-    <div className="container mx-auto max-w-4xl px-6 py-10 flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Batch Scrape</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Scrape many URLs in one async job. Status is polled every 2s.
-        </p>
+    <div className="flex min-h-svh flex-col">
+      <PageHeader
+        title="Batch scrape"
+        subtitle="Run many scrapes in a single async job. Status polls every 2 s."
+        endpoint="POST /v2/batch-scrape"
+      />
+
+      <div className="flex-1 px-24 pb-48 pt-24">
+        <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-20">
+          {!token && <MissingTokenBanner />}
+
+          <Panel>
+            <PanelHeader
+              title="Request"
+              right={
+                <span className="font-mono text-mono-small text-black-alpha-56">
+                  {urlCount} {urlCount === 1 ? 'URL' : 'URLs'}
+                </span>
+              }
+            />
+            <PanelBody>
+              <form onSubmit={onSubmit} className="flex flex-col gap-16">
+                <Field
+                  id="batch-urls"
+                  label="URLs"
+                  hint="One URL per line."
+                >
+                  <FormTextarea
+                    id="batch-urls"
+                    rows={8}
+                    value={urlsRaw}
+                    onChange={(e) => setUrlsRaw(e.target.value)}
+                    disabled={submitting}
+                    required
+                  />
+                </Field>
+
+                <FormToolbar status={<AuthStatus token={token} />}>
+                  <PrimaryButton type="submit" disabled={submitting || !token}>
+                    {submitting ? (
+                      <>
+                        <Loader2 className="h-14 w-14 animate-spin" />
+                        Starting…
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-14 w-14" />
+                        Start batch scrape
+                      </>
+                    )}
+                  </PrimaryButton>
+                </FormToolbar>
+              </form>
+            </PanelBody>
+          </Panel>
+
+          {error && <ErrorAlert error={error} />}
+
+          {jobId && (
+            <JobStatusPanel
+              jobId={jobId}
+              mode="batch"
+              onCleared={() => setJobId(null)}
+            />
+          )}
+        </div>
       </div>
-
-      {!token && <MissingTokenBanner />}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Request</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="batch-urls">URLs (one per line)</Label>
-              <Textarea
-                id="batch-urls"
-                rows={6}
-                value={urlsRaw}
-                onChange={(e) => setUrlsRaw(e.target.value)}
-                disabled={submitting}
-                required
-              />
-            </div>
-            <div>
-              <Button type="submit" disabled={submitting || !token}>
-                {submitting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Starting…
-                  </>
-                ) : (
-                  'Start batch scrape'
-                )}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      {error && <ErrorAlert error={error} />}
-
-      {jobId && (
-        <JobStatusPanel
-          jobId={jobId}
-          mode="batch"
-          onCleared={() => setJobId(null)}
-        />
-      )}
     </div>
   );
 }

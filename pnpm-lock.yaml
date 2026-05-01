@@ -178,6 +178,9 @@ importers:
       papaparse:
         specifier: ^5.4.1
         version: 5.5.3
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
       pixi.js:
         specifier: ^8.13.2
         version: 8.13.2

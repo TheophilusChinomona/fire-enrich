@@ -10,6 +10,43 @@ export class AdminUnauthorizedError extends Error {
   }
 }
 
+/**
+ * Identity of the authenticated operator after `requireOperator()` succeeds.
+ *
+ * - `source: 'cf-access'` — request came through a trusted reverse proxy
+ *   (Cloudflare Access via Traefik forwardAuth). `email` is the verified
+ *   identity from the upstream JWT.
+ * - `source: 'admin-token'` — legacy single-shared-secret cookie. The
+ *   dashboard has no real per-user identity in this mode, so `email` is
+ *   the literal string `"admin"`.
+ */
+export interface OperatorIdentity {
+  email: string;
+  source: 'cf-access' | 'admin-token';
+}
+
+type AuthMode = 'admin-token' | 'proxy' | 'either';
+
+const PROXY_EMAIL_HEADER = 'x-auth-user-email';
+
+function getAuthMode(): AuthMode {
+  const raw = (process.env.OPS_AUTH_MODE ?? 'admin-token').trim().toLowerCase();
+  if (raw === 'admin-token' || raw === 'proxy' || raw === 'either') return raw;
+  throw new Error(
+    `OPS_AUTH_MODE must be admin-token | proxy | either (got "${raw}")`,
+  );
+}
+
+function getOperatorAllowlist(): Set<string> | null {
+  const raw = process.env.OPERATOR_EMAILS?.trim();
+  if (!raw) return null;
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return parts.length > 0 ? new Set(parts) : null;
+}
+
 function getAdminToken(): string {
   const t = process.env.ADMIN_TOKEN;
   if (!t) throw new Error('ADMIN_TOKEN env var not set');
@@ -33,6 +70,14 @@ function getCookieSecret(): string {
  * the auth path uniform.
  */
 export async function loginAdmin(plaintext: string): Promise<string> {
+  // Belt-and-braces: never mint a long-lived cookie when the deployment
+  // has explicitly delegated auth to an upstream proxy. Even if an old
+  // ADMIN_TOKEN env var lingers, this path stays closed.
+  if (getAuthMode() === 'proxy') {
+    throw new AdminUnauthorizedError(
+      'admin-token login disabled when OPS_AUTH_MODE=proxy',
+    );
+  }
   const expected = Buffer.from(getAdminToken());
   const provided = Buffer.from(plaintext);
   if (
@@ -45,10 +90,62 @@ export async function loginAdmin(plaintext: string): Promise<string> {
 }
 
 /**
- * Verify the request's `__fe_admin` cookie. Throws AdminUnauthorizedError
- * if missing, malformed, expired, or the HMAC signature doesn't match.
+ * Resolve the operator behind the request. The active strategy depends on
+ * `OPS_AUTH_MODE`:
+ *
+ * - `admin-token` *(default)*: legacy `__fe_admin` cookie only. Returns
+ *   `{ email: 'admin', source: 'admin-token' }`.
+ * - `proxy`: trust `X-Auth-User-Email` from a known-good reverse proxy
+ *   (Traefik forwardAuth → cf-access-verifier). Returns the verified email.
+ *   The dashboard MUST be unreachable except through that proxy.
+ * - `either`: try the proxy header first, fall back to the cookie. Useful
+ *   during a migration window or as a break-glass path.
+ *
+ * In `proxy` mode, `OPERATOR_EMAILS` (comma-separated) optionally restricts
+ * which authenticated identities are accepted. Unset = anyone the proxy
+ * authenticated is in.
+ */
+export function requireOperator(headers: Headers): OperatorIdentity {
+  const mode = getAuthMode();
+
+  if (mode === 'proxy' || mode === 'either') {
+    const proxied = readProxyIdentity(headers);
+    if (proxied) {
+      const allow = getOperatorAllowlist();
+      if (allow && !allow.has(proxied.email.toLowerCase())) {
+        throw new AdminUnauthorizedError(
+          `operator email not in OPERATOR_EMAILS allowlist: ${proxied.email}`,
+        );
+      }
+      return proxied;
+    }
+    if (mode === 'proxy') {
+      throw new AdminUnauthorizedError(
+        `missing ${PROXY_EMAIL_HEADER} header (OPS_AUTH_MODE=proxy expects a trusted reverse proxy in front)`,
+      );
+    }
+    // mode === 'either' → fall through to cookie check below
+  }
+
+  verifyAdminCookie(headers);
+  return { email: 'admin', source: 'admin-token' };
+}
+
+/**
+ * Backwards-compatible thin wrapper over `requireOperator`. Existing
+ * callers that don't care about identity keep working with no changes.
  */
 export function requireAdmin(headers: Headers): void {
+  requireOperator(headers);
+}
+
+function readProxyIdentity(headers: Headers): OperatorIdentity | null {
+  const email = headers.get(PROXY_EMAIL_HEADER)?.trim();
+  if (!email) return null;
+  return { email, source: 'cf-access' };
+}
+
+function verifyAdminCookie(headers: Headers): void {
   const cookieHeader = headers.get('cookie') ?? '';
   const value = pickCookie(cookieHeader, ADMIN_COOKIE_NAME);
   if (!value) throw new AdminUnauthorizedError('no admin cookie');

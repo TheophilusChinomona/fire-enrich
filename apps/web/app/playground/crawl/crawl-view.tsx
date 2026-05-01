@@ -1,16 +1,20 @@
 'use client';
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Play } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import Input from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 
 import { ErrorAlert, type ApiError } from '../_components/ErrorAlert';
 import { JobStatusPanel } from '../_components/JobStatusPanel';
 import { MissingTokenBanner } from '../_components/MissingTokenBanner';
+import { PageHeader } from '../_components/PageHeader';
+import { Panel, PanelBody, PanelHeader } from '../_components/Panel';
+import { PrimaryButton } from '../_components/PrimaryButton';
+import {
+  AuthStatus,
+  Field,
+  FormInput,
+  FormToolbar,
+} from '../_components/form-primitives';
 import { usePlaygroundToken } from '../_components/use-token';
 
 export function CrawlView() {
@@ -67,72 +71,78 @@ export function CrawlView() {
   };
 
   return (
-    <div className="container mx-auto max-w-4xl px-6 py-10 flex flex-col gap-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Crawl</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Spider a website. The job runs asynchronously; status updates stream
-          over SSE.
-        </p>
+    <div className="flex min-h-svh flex-col">
+      <PageHeader
+        title="Crawl"
+        subtitle="Spider a site. Status streams over SSE while it runs."
+        endpoint="POST /v2/crawl"
+      />
+
+      <div className="flex-1 px-24 pb-48 pt-24">
+        <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-20">
+          {!token && <MissingTokenBanner />}
+
+          <Panel>
+            <PanelHeader title="Request" />
+            <PanelBody>
+              <form onSubmit={onSubmit} className="flex flex-col gap-16">
+                <Field id="crawl-url" label="URL">
+                  <FormInput
+                    id="crawl-url"
+                    type="url"
+                    placeholder="https://docs.firecrawl.dev"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    disabled={submitting}
+                    required
+                  />
+                </Field>
+                <Field
+                  id="crawl-limit"
+                  label="Page limit"
+                  hint="Maximum pages to fetch in this crawl. Hard cap is 1000."
+                >
+                  <FormInput
+                    id="crawl-limit"
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={limit}
+                    onChange={(e) => setLimit(Number(e.target.value) || 1)}
+                    disabled={submitting}
+                  />
+                </Field>
+
+                <FormToolbar status={<AuthStatus token={token} />}>
+                  <PrimaryButton type="submit" disabled={submitting || !token}>
+                    {submitting ? (
+                      <>
+                        <Loader2 className="h-14 w-14 animate-spin" />
+                        Starting…
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-14 w-14" />
+                        Start crawl
+                      </>
+                    )}
+                  </PrimaryButton>
+                </FormToolbar>
+              </form>
+            </PanelBody>
+          </Panel>
+
+          {error && <ErrorAlert error={error} />}
+
+          {jobId && (
+            <JobStatusPanel
+              jobId={jobId}
+              mode="crawl"
+              onCleared={() => setJobId(null)}
+            />
+          )}
+        </div>
       </div>
-
-      {!token && <MissingTokenBanner />}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Request</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="crawl-url">URL</Label>
-              <Input
-                id="crawl-url"
-                type="url"
-                placeholder="https://docs.firecrawl.dev"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                disabled={submitting}
-                required
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="crawl-limit">Page limit</Label>
-              <Input
-                id="crawl-limit"
-                type="number"
-                min={1}
-                max={1000}
-                value={limit}
-                onChange={(e) => setLimit(Number(e.target.value) || 1)}
-                disabled={submitting}
-              />
-            </div>
-            <div>
-              <Button type="submit" disabled={submitting || !token}>
-                {submitting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Starting…
-                  </>
-                ) : (
-                  'Start crawl'
-                )}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      {error && <ErrorAlert error={error} />}
-
-      {jobId && (
-        <JobStatusPanel
-          jobId={jobId}
-          mode="crawl"
-          onCleared={() => setJobId(null)}
-        />
-      )}
     </div>
   );
 }

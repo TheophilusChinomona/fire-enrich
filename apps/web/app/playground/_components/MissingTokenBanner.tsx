@@ -1,25 +1,31 @@
 'use client';
 
 import Link from 'next/link';
-import { AlertTriangle } from 'lucide-react';
+import { KeyRound } from 'lucide-react';
 
 export function MissingTokenBanner() {
   return (
     <div
       role="alert"
-      className="flex items-start gap-3 rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-900 dark:border-yellow-700 dark:bg-yellow-950/40 dark:text-yellow-100"
+      className="flex items-start gap-12 rounded-10 border border-border-muted bg-background-lighter p-16"
     >
-      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-      <div>
-        Set your bearer token to use the playground.{' '}
-        <Link
-          href="/admin/principals"
-          className="font-medium underline underline-offset-2"
-        >
-          Create one in /admin/principals →
-        </Link>
-        {' '}then click <span className="font-medium">Set token</span> in the
-        sidebar.
+      <span className="flex h-32 w-32 shrink-0 items-center justify-center rounded-8 bg-heat-12 text-heat-100">
+        <KeyRound className="h-16 w-16" />
+      </span>
+      <div className="flex flex-col gap-4 pt-2">
+        <p className="text-body-small font-medium text-accent-black">
+          Set your bearer token to run the playground.
+        </p>
+        <p className="text-body-small text-black-alpha-72">
+          Issue one in{' '}
+          <Link
+            href="/admin/principals"
+            className="font-medium text-heat-100 underline decoration-heat-40 underline-offset-2 transition-colors hover:decoration-heat-100"
+          >
+            /admin/principals
+          </Link>
+          {' '}then click <span className="font-mono text-mono-small text-accent-black">API token</span> at the bottom of the sidebar.
+        </p>
       </div>
     </div>
   );
