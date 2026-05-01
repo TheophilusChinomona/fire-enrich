@@ -275,6 +275,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@fire-enrich/db':
+        specifier: workspace:*
+        version: link:../db
       '@mendable/firecrawl-js':
         specifier: ^4.20.1
         version: 4.20.1
