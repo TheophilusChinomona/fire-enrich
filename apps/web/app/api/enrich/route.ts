@@ -3,75 +3,111 @@ import { AgentEnrichmentStrategy } from '@/lib/strategies/agent-enrichment-strat
 import type { EnrichmentRequest, RowEnrichmentResult } from '@/lib/types';
 import { loadSkipList, shouldSkipEmail, getSkipReason } from '@/lib/utils/skip-list';
 import { ENRICHMENT_CONFIG } from '@/lib/config/enrichment';
+import {
+  NoKeyAvailableError,
+  QuotaExceededError,
+  UnauthorizedError,
+  requireBearer,
+  resolveFirecrawlKey,
+  resolveOpenAIKey,
+} from '@fire-enrich/core/server';
+import { getDb, recordUsage, type Principal } from '@fire-enrich/db';
 
 // Use Node.js runtime for better compatibility
 export const runtime = 'nodejs';
 
-// Store active sessions in memory (in production, use Redis or similar)
+// Store active sessions in memory (in production, use Redis or similar).
+// The sessionId itself is treated as an unguessable capability — DELETE
+// does not require a bearer in v1. The token is generated server-side and
+// only ever returned to the client that started the stream.
 const activeSessions = new Map<string, AbortController>();
 
 export async function POST(request: NextRequest) {
+  // Add request body size check
+  const contentLength = request.headers.get('content-length');
+  if (contentLength && parseInt(contentLength) > 5 * 1024 * 1024) { // 5MB limit
+    return NextResponse.json(
+      { error: 'Request body too large' },
+      { status: 413 }
+    );
+  }
+
+  // Authenticate before consuming the body so we 401 quickly.
+  const db = getDb();
+  let principal: Principal;
   try {
-    // Add request body size check
-    const contentLength = request.headers.get('content-length');
-    if (contentLength && parseInt(contentLength) > 5 * 1024 * 1024) { // 5MB limit
+    principal = await requireBearer(request.headers, db);
+  } catch (err) {
+    if (err instanceof UnauthorizedError) {
       return NextResponse.json(
-        { error: 'Request body too large' },
-        { status: 413 }
+        { code: err.code, error: err.message },
+        { status: 401 }
       );
     }
+    throw err;
+  }
 
-    const body: EnrichmentRequest = await request.json();
-    const { rows, fields, emailColumn, nameColumn } = body;
+  let body: EnrichmentRequest;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+  const { rows, fields, emailColumn, nameColumn } = body;
 
-    if (!rows || rows.length === 0) {
+  if (!rows || rows.length === 0) {
+    return NextResponse.json(
+      { error: 'No rows provided' },
+      { status: 400 }
+    );
+  }
+
+  if (!fields || fields.length === 0 || fields.length > 10) {
+    return NextResponse.json(
+      { error: 'Please provide 1-10 fields to enrich' },
+      { status: 400 }
+    );
+  }
+
+  if (!emailColumn) {
+    return NextResponse.json(
+      { error: 'Email column is required' },
+      { status: 400 }
+    );
+  }
+
+  // Resolve keys up front so we can fail fast (503 / no_key_available)
+  // before opening the SSE stream. Quota is checked lazily per row inside
+  // the stream so a mid-stream exhaustion can still emit a clean SSE
+  // error event instead of a 500.
+  let firecrawlKey: { key: string; source: 'byok' | 'pooled' };
+  let openaiKey: { key: string; source: 'byok' | 'pooled' };
+  try {
+    firecrawlKey = resolveFirecrawlKey(principal);
+    openaiKey = resolveOpenAIKey(principal);
+  } catch (err) {
+    if (err instanceof NoKeyAvailableError) {
       return NextResponse.json(
-        { error: 'No rows provided' },
-        { status: 400 }
+        { code: err.code, error: err.message, scope: err.scope },
+        { status: 503 }
       );
     }
+    throw err;
+  }
 
-    if (!fields || fields.length === 0 || fields.length > 10) {
-      return NextResponse.json(
-        { error: 'Please provide 1-10 fields to enrich' },
-        { status: 400 }
-      );
-    }
-
-    if (!emailColumn) {
-      return NextResponse.json(
-        { error: 'Email column is required' },
-        { status: 400 }
-      );
-    }
-
+  try {
     // Use a more compatible UUID generation
     const sessionId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const abortController = new AbortController();
     activeSessions.set(sessionId, abortController);
 
-    // Check environment variables and headers for API keys
-    const openaiApiKey = process.env.OPENAI_API_KEY || request.headers.get('X-OpenAI-API-Key');
-    const firecrawlApiKey = process.env.FIRECRAWL_API_KEY || request.headers.get('X-Firecrawl-API-Key');
-    
-    if (!openaiApiKey || !firecrawlApiKey) {
-      console.error('Missing API keys:', { 
-        hasOpenAI: !!openaiApiKey, 
-        hasFirecrawl: !!firecrawlApiKey 
-      });
-      return NextResponse.json(
-        { error: 'Server configuration error: Missing API keys' },
-        { status: 500 }
-      );
-    }
-
     // Always use the advanced agent architecture
     const strategyName = 'AgentEnrichmentStrategy';
-    
+
     console.log(`[STRATEGY] Using ${strategyName} - Advanced multi-agent architecture with specialized agents`);
     const enrichmentStrategy = new AgentEnrichmentStrategy(
-      openaiApiKey,
-      firecrawlApiKey
+      openaiKey.key,
+      firecrawlKey.key
     );
 
     // Load skip list
@@ -81,6 +117,50 @@ export async function POST(request: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
+        // Helper: record one usage event per enriched row, best-effort.
+        const recordRowUsage = async (ok: 0 | 1) => {
+          // Each enriched row consumes from BOTH firecrawl + openai pools.
+          // Record one event per scope so quota accounting stays accurate.
+          await Promise.all([
+            recordUsage(
+              {
+                principalId: principal.id,
+                scope: 'firecrawl',
+                op: 'enrich_row',
+                source: firecrawlKey.source,
+                ok,
+              },
+              db as never
+            ).catch((e) => console.error('failed to record firecrawl usage', e)),
+            recordUsage(
+              {
+                principalId: principal.id,
+                scope: 'openai',
+                op: 'enrich_row',
+                source: openaiKey.source,
+                ok,
+              },
+              db as never
+            ).catch((e) => console.error('failed to record openai usage', e)),
+          ]);
+        };
+
+        // Emit a final SSE error event then close. Used when quota
+        // exhaustion or another fatal error occurs mid-stream so we don't
+        // 500 the connection.
+        const emitFatalError = (
+          code: string,
+          message: string,
+          scope?: 'firecrawl' | 'openai'
+        ) => {
+          const payload: Record<string, unknown> = { code, error: message };
+          if (scope) payload.scope = scope;
+          // SSE convention: an explicit `event:` channel + JSON data.
+          controller.enqueue(
+            encoder.encode(`event: error\ndata: ${JSON.stringify(payload)}\n\n`)
+          );
+        };
+
         try {
           // Send session ID
           controller.enqueue(
@@ -106,12 +186,18 @@ export async function POST(request: NextRequest) {
             );
           }
 
+          // Quota state — once tripped, we abort outstanding work and
+          // emit a single fatal SSE error. We cache the error so the
+          // outer loop can detect it and break cleanly.
+          let quotaError: QuotaExceededError | null = null;
+
           // Process rows with rolling concurrency
           const processRow = async (i: number) => {
             // Check if cancelled
             if (abortController.signal.aborted) {
               return;
             }
+            if (quotaError) return;
 
             const row = rows[i];
             const email = row[emailColumn];
@@ -156,6 +242,33 @@ export async function POST(request: NextRequest) {
                 })}\n\n`
               )
             );
+
+            // Quota check — only when at least one resolved key is pooled.
+            // BYOK calls aren't subject to fire-enrich's quota; the upstream
+            // fork enforces them. We import the check lazily via dynamic
+            // import to keep this route tree-shake-friendly even though
+            // it's tiny.
+            if (
+              firecrawlKey.source === 'pooled' ||
+              openaiKey.source === 'pooled'
+            ) {
+              try {
+                const { enforceQuota } = await import('@fire-enrich/core/server');
+                if (firecrawlKey.source === 'pooled') {
+                  await enforceQuota(principal, 'firecrawl', db);
+                }
+                if (openaiKey.source === 'pooled') {
+                  await enforceQuota(principal, 'openai', db);
+                }
+              } catch (err) {
+                if (err instanceof QuotaExceededError) {
+                  quotaError = err;
+                  abortController.abort();
+                  return;
+                }
+                throw err;
+              }
+            }
 
             try {
               // Enrich the row
@@ -206,7 +319,9 @@ export async function POST(request: NextRequest) {
                   })}\n\n`
                 )
               );
+              await recordRowUsage(1);
             } catch (error) {
+              await recordRowUsage(0);
               // Send error for this row
               const errorResult: RowEnrichmentResult = {
                 rowIndex: i,
@@ -234,11 +349,13 @@ export async function POST(request: NextRequest) {
           while (currentIndex < rows.length || activePromises.length > 0) {
             // Check if cancelled
             if (abortController.signal.aborted) {
-              controller.enqueue(
-                encoder.encode(
-                  `data: ${JSON.stringify({ type: 'cancelled' })}\n\n`
-                )
-              );
+              if (!quotaError) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({ type: 'cancelled' })}\n\n`
+                  )
+                );
+              }
               break;
             }
 
@@ -261,21 +378,39 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Send completion
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: 'complete' })}\n\n`
-            )
-          );
+          // If quota tripped mid-stream, drain remaining work and emit
+          // a fatal error event instead of `complete`.
+          if (quotaError) {
+            await Promise.allSettled(activePromises);
+            emitFatalError(
+              quotaError.code,
+              quotaError.message,
+              quotaError.scope
+            );
+          } else {
+            // Send completion
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: 'complete' })}\n\n`
+              )
+            );
+          }
         } catch (error) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: 'error',
-                error: error instanceof Error ? error.message : 'Unknown error',
-              })}\n\n`
-            )
-          );
+          // Catch-all: errors that escape per-row handling. Quota errors
+          // are already handled above; anything else becomes a generic
+          // SSE error event.
+          if (error instanceof QuotaExceededError) {
+            emitFatalError(error.code, error.message, error.scope);
+          } else {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: 'error',
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                })}\n\n`
+              )
+            );
+          }
         } finally {
           activeSessions.delete(sessionId);
           controller.close();
@@ -293,7 +428,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Failed to start enrichment:', error);
     return NextResponse.json(
-      { 
+      {
         error: 'Failed to start enrichment',
         details: error instanceof Error ? error.message : 'Unknown error',
         timestamp: new Date().toISOString()
@@ -303,7 +438,8 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Cancel endpoint
+// Cancel endpoint. The sessionId is treated as a capability — possession
+// of an unguessable id is enough to abort. No bearer required.
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('sessionId');
