@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@fire-enrich/core": "workspace:*",
+    "@fire-enrich/db": "workspace:*",
     "@openai/agents": "^0.8.5",
     "@ai-sdk/openai": "^1.3.22",
     "@hookform/resolvers": "^5.0.1",
