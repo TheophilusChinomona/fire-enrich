@@ -1,2 +1,2 @@
-// Schema barrel — populated in Task 1.6.
-export {};
+export * from './principals.js';
+export * from './usage.js';
